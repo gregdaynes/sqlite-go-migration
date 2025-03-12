@@ -63,10 +63,18 @@ CGO seems to be fine to use for sqlite. I was a little worried about it being sl
 - [x] Get existing table schema
 - [x] Get pristine schema
 - [x] Diff schemas
-- [x] * create new tables
-- [ ] * filter list of same columns to get columns to migrate
-- [ ] * create copy column query for the changed tables
-- [ ] * figure out 12 steps
+- [x] create new tables
+- [x] compare table columns to find altered tables
+- [ ] * disable foreign keys (can probably be across all changes)
+- [ ] * start transaction (do we want one for all or one for each table?)
+- [ ] * rename the pristine table creation statement table to some prefix/suffix - no idea string manip?
+- [ ] * transfer content from old to new
+- [ ] * drop old table
+- [ ] * rename new table
+- [ ] * create indexes again
+- [ ] * validate foreign keys `PRAGMA foreign_key_check`
+- [ ] * commit transaction
+- [ ] * re-enable foreign keys
 
 ## References
 
