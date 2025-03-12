@@ -12,4 +12,3 @@ CREATE TABLE IF NOT EXISTS table_two
     column_3 string
 );
 
-

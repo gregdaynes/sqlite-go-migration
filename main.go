@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 
@@ -29,9 +30,8 @@ func main() {
 
 	emap := mapDBSchema(edb)
 
-	// compare dbs
-	nt := findMissingMapEntries(pmap, emap)
-	rt := findMissingMapEntries(emap, pmap)
+	// new and removed tables
+	nt, rt := diff(pmap, emap)
 
 	err = removeTables(edb, rt)
 	if err != nil {
@@ -43,6 +43,39 @@ func main() {
 		log.Fatal(err)
 	}
 
+	tablesAltered := findAlteredTables(pdb, edb, pmap, nt)
+	fmt.Println(tablesAltered)
+
+	// for each altered table, we perform the operations outlined in sqlite's documentation
+
+}
+
+func mapTableCols(db *sql.DB, tableName string) (cols map[string]string) {
+	cols = make(map[string]string)
+
+	// run the query to get the column
+	rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for rows.Next() {
+		var id int
+		var name string
+		var coltype string
+		var notnull int
+		var dfltValue any
+		var pk int
+
+		err = rows.Scan(&id, &name, &coltype, &notnull, &dfltValue, &pk)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		cols[name] = "true"
+	}
+
+	return cols
 }
 
 func removeTables(db *sql.DB, kv map[string]string) (err error) {
@@ -130,15 +163,52 @@ func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
 	return c
 }
 
-// procedure - generate the schema for a pristine/new database instance
-// establish a connection to an in memory database
-// read in the schema.sql file
-// run the statements on the pristine database
-// dump the sqlite schema for the new database tables
-// store in a map with the name being the key, value being the create table statement
-//
-// if we have an existing database, perform the operation to get the sqlite_schema
-// store that as a map
-// iterate the maps to find the new tables
-//
-// the unique new tables can have their create table statements run
+func findAlteredTables(pdb, edb *sql.DB, pmap, nt map[string]string) map[string]struct{} {
+	at := make(map[string]struct{})
+
+	for name := range tablesToDiffColumns(pmap, nt) {
+		pcols := mapTableCols(pdb, name)
+		ecols := mapTableCols(edb, name)
+
+		add, remove := diff(pcols, ecols)
+
+		if len(add) > 0 || len(remove) > 0 {
+			at[name] = struct{}{}
+		}
+	}
+
+	return at
+}
+
+func tablesToDiffColumns(currentTables, newTables map[string]string) map[string]bool {
+	tablesForColumns := make(map[string]bool)
+	for name := range currentTables {
+		_, exists := newTables[name]
+		if !exists {
+			tablesForColumns[name] = true
+		}
+	}
+
+	return tablesForColumns
+}
+
+func diff[T any](a, b map[string]T) (add, remove map[string]T) {
+	add = make(map[string]T)
+	remove = make(map[string]T)
+
+	for k := range a {
+		_, ok := b[k]
+		if !ok {
+			add[k] = a[k]
+		}
+	}
+
+	for k := range b {
+		_, ok := a[k]
+		if !ok {
+			remove[k] = b[k]
+		}
+	}
+
+	return add, remove
+}
