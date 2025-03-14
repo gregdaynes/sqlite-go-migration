@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -48,6 +49,64 @@ func main() {
 
 	// for each altered table, we perform the operations outlined in sqlite's documentation
 
+	// 1. Disable foreign keys
+	_, err = edb.Exec("PRAGMA foreign_keys = OFF")
+
+	// 2. Start transaction
+	tx, err := edb.Begin()
+
+	// 3. Define create table statement with new name
+	// 4. Create new tables
+	for k := range tablesAltered {
+		knew := k + "_new"
+		stmt := strings.Replace(pmap[k], k, knew, 1)
+
+		_, err = edb.Exec(stmt)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 5. Transfer table contents to new table
+		// need to get the intersection of column names of the old and new table for the insert query
+		pcols := mapTableCols(pdb, k)
+		ecols := mapTableCols(edb, k)
+		intersect := intersectKeys(pcols, ecols)
+		cols := strings.Join(intersect[:], ",")
+		query := "INSERT INTO " + knew + "(" + cols + ") SELECT " + cols + " FROM " + k
+		fmt.Println(query)
+		_, err = edb.Exec(query)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// // 6. Drop old table
+		_, err = edb.Exec("DROP TABLE " + k)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 7. Rename new table to old table
+		_, err = edb.Exec("ALTER TABLE " + knew + " RENAME TO " + k)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 8. Use CREATE INDEX, CREATE TRIGGER, and CREATE VIEW to reconstruct indexes, triggers, and views associated with table X. Perhaps use the old format of the triggers, indexes, and views saved from step 3 above as a guide, making changes as appropriate for the alteration.
+
+		// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
+	}
+
+	// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
+	_, err = edb.Exec("PRAGMA foreign_key_check")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 11.
+	err = tx.Commit()
+
+	// 12. Enable foreign keys again
+	_, err = edb.Exec("PRAGMA foreign_keys = ON")
 }
 
 func mapTableCols(db *sql.DB, tableName string) (cols map[string]string) {
@@ -91,7 +150,6 @@ func removeTables(db *sql.DB, kv map[string]string) (err error) {
 }
 
 func createTables(db *sql.DB, kv map[string]string) (err error) {
-	// create new tables
 	for _, sql := range kv {
 		_, err := db.Exec(sql)
 		if err != nil {
@@ -211,4 +269,21 @@ func diff[T any](a, b map[string]T) (add, remove map[string]T) {
 	}
 
 	return add, remove
+}
+
+func intersectKeys[T any](a, b map[string]T) []string {
+	intersection := []string{}
+
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+
+	for k := range a {
+		_, ok := b[k]
+		if ok {
+			intersection = append(intersection, k)
+		}
+	}
+
+	return intersection
 }

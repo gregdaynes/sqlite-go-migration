@@ -65,16 +65,16 @@ CGO seems to be fine to use for sqlite. I was a little worried about it being sl
 - [x] Diff schemas
 - [x] create new tables
 - [x] compare table columns to find altered tables
-- [ ] * disable foreign keys (can probably be across all changes)
-- [ ] * start transaction (do we want one for all or one for each table?)
-- [ ] * rename the pristine table creation statement table to some prefix/suffix - no idea string manip?
-- [ ] * transfer content from old to new
-- [ ] * drop old table
-- [ ] * rename new table
+- [x] * disable foreign keys (can probably be across all changes)
+- [x] * start transaction (do we want one for all or one for each table?)
+- [x] * rename the pristine table creation statement table to some prefix/suffix - no idea string manip?
+- [x] * transfer content from old to new
+- [x] * drop old table
+- [x] * rename new table
 - [ ] * create indexes again
-- [ ] * validate foreign keys `PRAGMA foreign_key_check`
-- [ ] * commit transaction
-- [ ] * re-enable foreign keys
+- [x] * validate foreign keys `PRAGMA foreign_key_check`
+- [x] * commit transaction
+- [x] * re-enable foreign keys
 
 ## References
 
