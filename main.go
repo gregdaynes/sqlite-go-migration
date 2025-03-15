@@ -10,83 +10,210 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func main() {
-	schema := schema("./schema.sql")
+type DB struct {
+	Connection *sql.DB
+	Schema     map[string]Table
+}
 
-	// Pristine DB
-	pdb := connectDB("file:test.db?mode=memory")
-	defer pdb.Close()
+type Table struct {
+	Name    string
+	SQL     string
+	Columns TableColumnMap
+}
 
-	_, err := pdb.Exec(schema)
+type TableColumn struct {
+	Name         string
+	Type         string
+	NotNull      bool
+	DefaultValue any
+	PrimaryKey   bool
+}
+
+type TableColumnMap map[string]TableColumn
+
+func NewDB(dsn string) (db *DB) {
+	db = &DB{
+		Connection: connectDB(dsn),
+		Schema:     make(map[string]Table),
+	}
+
+	return db
+}
+
+func (db *DB) GetSchema() map[string]Table {
+	if len(db.Schema) == 0 {
+		db.Schema = make(map[string]Table)
+
+		rows, _ := db.Query(`
+			SELECT name, sql from sqlite_schema
+			where type = "table" and name != "sqlite_sequence";
+		`)
+		defer rows.Close()
+
+		for rows.Next() {
+			var name string
+			var sql string
+
+			err := rows.Scan(&name, &sql)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			db.Schema[name] = Table{Name: name, SQL: sql, Columns: make(TableColumnMap)}
+		}
+	}
+
+	return db.Schema
+}
+
+func (db *DB) GetColumnMap(tableName string) TableColumnMap {
+	if len(db.Schema[tableName].Columns) == 0 {
+		// run the query to get the column
+		rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for rows.Next() {
+			var id int
+			var name string
+			var coltype string
+			var notnull int
+			var dfltValue any
+			var pk int
+
+			err = rows.Scan(&id, &name, &coltype, &notnull, &dfltValue, &pk)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			db.Schema[tableName].Columns[name] = TableColumn{
+				Name:         name,
+				Type:         coltype,
+				NotNull:      notnull == 1,
+				DefaultValue: dfltValue,
+				PrimaryKey:   pk == 1,
+			}
+		}
+	}
+
+	return db.Schema[tableName].Columns
+}
+
+func (db *DB) Exec(sql string) (err error) {
+	_, err = db.Connection.Exec(sql)
 	if err != nil {
-		log.Printf("%q: %s\n", err, schema)
+		log.Printf("%q: %s\n", err, sql)
+	}
+	return err
+}
+
+func (db *DB) Query(sql string) (rows *sql.Rows, err error) {
+	rows, err = db.Connection.Query(sql)
+	if err != nil {
+		log.Printf("%q: %s\n", err, sql)
+	}
+	return rows, err
+}
+
+func (db *DB) Close() (err error) {
+	err = db.Connection.Close()
+	return err
+}
+
+func (db *DB) removeTables(kv map[string]Table) (err error) {
+	for name := range kv {
+		err := db.Exec("DROP TABLE IF EXISTS " + name)
+		if err != nil {
+			log.Printf("%q: %s\n", err, name)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (db *DB) createTables(kv map[string]Table) (err error) {
+	for _, table := range kv {
+		err := db.Exec(table.SQL)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func main() {
+	// Existing DB
+	CurrentDB := NewDB("file:test.db")
+	defer CurrentDB.Close()
+
+	// Temporary In Memory DB - Based on the schema.sql file
+	CleanDB := NewDB("file:test.db?mode=memory")
+	defer CleanDB.Close()
+
+	schema := ReadSchema("./schema.sql")
+	if err := CleanDB.Exec(schema); err != nil {
 		return
 	}
 
-	pmap := mapDBSchema(pdb)
+	newTables, tablesToDrop := diff(CleanDB.GetSchema(), CurrentDB.GetSchema())
 
-	// Existing DB
-	edb := connectDB("file:test.db")
-	defer edb.Close()
-
-	emap := mapDBSchema(edb)
-
-	// new and removed tables
-	nt, rt := diff(pmap, emap)
-
-	err = removeTables(edb, rt)
+	err := CurrentDB.removeTables(tablesToDrop)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = createTables(edb, nt)
+	err = CurrentDB.createTables(newTables)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	tablesAltered := findAlteredTables(pdb, edb, pmap, nt)
-	fmt.Println(tablesAltered)
-
-	// for each altered table, we perform the operations outlined in sqlite's documentation
 
 	// 1. Disable foreign keys
-	_, err = edb.Exec("PRAGMA foreign_keys = OFF")
+	err = CurrentDB.Exec("PRAGMA foreign_keys = OFF")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// 2. Start transaction
-	tx, err := edb.Begin()
+	tx, err := CurrentDB.Connection.Begin()
 
 	// 3. Define create table statement with new name
 	// 4. Create new tables
-	for k := range tablesAltered {
-		knew := k + "_new"
-		stmt := strings.Replace(pmap[k], k, knew, 1)
+	// for each altered table, we perform the operations outlined in sqlite's documentation
+	for tableName := range CurrentDB.findAlteredTables(CleanDB) {
+		tableNameNew := tableName + "_new"
+		schema := CurrentDB.GetSchema()
+		stmt := strings.Replace(schema[tableName].SQL, tableName, tableNameNew, 1)
 
-		_, err = edb.Exec(stmt)
+		err = CurrentDB.Exec(stmt)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// 5. Transfer table contents to new table
 		// need to get the intersection of column names of the old and new table for the insert query
-		pcols := mapTableCols(pdb, k)
-		ecols := mapTableCols(edb, k)
-		intersect := intersectKeys(pcols, ecols)
-		cols := strings.Join(intersect[:], ",")
-		query := "INSERT INTO " + knew + "(" + cols + ") SELECT " + cols + " FROM " + k
-		fmt.Println(query)
-		_, err = edb.Exec(query)
+		intersection := intersect(
+			CleanDB.GetColumnMap(tableName),
+			CurrentDB.GetColumnMap(tableName),
+		)
+
+		cols := strings.Join(intersection[:], ", ")
+		query := "INSERT INTO " + tableNameNew + " (" + cols + ") SELECT " + cols + " FROM " + tableName
+		err = CurrentDB.Exec(query)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		// // 6. Drop old table
-		_, err = edb.Exec("DROP TABLE " + k)
+		// 6. Drop old table
+		err = CurrentDB.Exec("DROP TABLE " + tableName)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// 7. Rename new table to old table
-		_, err = edb.Exec("ALTER TABLE " + knew + " RENAME TO " + k)
+		err = CurrentDB.Exec("ALTER TABLE " + tableNameNew + " RENAME TO " + tableName)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -97,8 +224,9 @@ func main() {
 	}
 
 	// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
-	_, err = edb.Exec("PRAGMA foreign_key_check")
+	err = CurrentDB.Exec("PRAGMA foreign_key_check")
 	if err != nil {
+
 		log.Fatal(err)
 	}
 
@@ -106,58 +234,9 @@ func main() {
 	err = tx.Commit()
 
 	// 12. Enable foreign keys again
-	_, err = edb.Exec("PRAGMA foreign_keys = ON")
-}
+	err = CurrentDB.Exec("PRAGMA foreign_keys = ON")
 
-func mapTableCols(db *sql.DB, tableName string) (cols map[string]string) {
-	cols = make(map[string]string)
-
-	// run the query to get the column
-	rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for rows.Next() {
-		var id int
-		var name string
-		var coltype string
-		var notnull int
-		var dfltValue any
-		var pk int
-
-		err = rows.Scan(&id, &name, &coltype, &notnull, &dfltValue, &pk)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		cols[name] = "true"
-	}
-
-	return cols
-}
-
-func removeTables(db *sql.DB, kv map[string]string) (err error) {
-	for name := range kv {
-		_, err := db.Exec("DROP TABLE IF EXISTS " + name)
-		if err != nil {
-			log.Printf("%q: %s\n", err, name)
-			return err
-		}
-	}
-
-	return nil
-}
-
-func createTables(db *sql.DB, kv map[string]string) (err error) {
-	for _, sql := range kv {
-		_, err := db.Exec(sql)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+	fmt.Println("Done")
 }
 
 func connectDB(dsn string) (db *sql.DB) {
@@ -169,43 +248,13 @@ func connectDB(dsn string) (db *sql.DB) {
 	return db
 }
 
-func schema(f string) string {
+func ReadSchema(f string) string {
 	b, err := os.ReadFile(f)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	return string(b)
-}
-
-func mapDBSchema(db *sql.DB) (smap map[string]string) {
-	smap = make(map[string]string)
-
-	// run the sqlite_schema dump
-	sqlStmt := `
-	SELECT name, sql from sqlite_schema
-	where type = "table" and name != "sqlite_sequence";
-	`
-	rows, err := db.Query(sqlStmt)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var name string
-		var sql string
-
-		err = rows.Scan(&name, &sql)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		smap[name] = sql
-	}
-
-	return smap
 }
 
 func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
@@ -221,33 +270,23 @@ func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
 	return c
 }
 
-func findAlteredTables(pdb, edb *sql.DB, pmap, nt map[string]string) map[string]struct{} {
-	at := make(map[string]struct{})
+func (db *DB) findAlteredTables(CleanDB *DB) map[string]struct{} {
+	alteredTables := make(map[string]struct{})
 
-	for name := range tablesToDiffColumns(pmap, nt) {
-		pcols := mapTableCols(pdb, name)
-		ecols := mapTableCols(edb, name)
+	// Both schemas are cached before the tables were created/dropped
+	// so we can compare the columns without filtering new ones out
+	for name := range db.GetSchema() {
+		CleanColumns := CleanDB.GetColumnMap(name)
+		CurrentColumns := db.GetColumnMap(name)
 
-		add, remove := diff(pcols, ecols)
+		add, remove := diff(CleanColumns, CurrentColumns)
 
 		if len(add) > 0 || len(remove) > 0 {
-			at[name] = struct{}{}
+			alteredTables[name] = struct{}{}
 		}
 	}
 
-	return at
-}
-
-func tablesToDiffColumns(currentTables, newTables map[string]string) map[string]bool {
-	tablesForColumns := make(map[string]bool)
-	for name := range currentTables {
-		_, exists := newTables[name]
-		if !exists {
-			tablesForColumns[name] = true
-		}
-	}
-
-	return tablesForColumns
+	return alteredTables
 }
 
 func diff[T any](a, b map[string]T) (add, remove map[string]T) {
@@ -271,7 +310,7 @@ func diff[T any](a, b map[string]T) (add, remove map[string]T) {
 	return add, remove
 }
 
-func intersectKeys[T any](a, b map[string]T) []string {
+func intersect[T any](a, b map[string]T) []string {
 	intersection := []string{}
 
 	if len(a) > len(b) {
