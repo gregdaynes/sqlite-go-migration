@@ -1,4 +1,4 @@
-package lib
+package main
 
 type Index struct {
 	Name string

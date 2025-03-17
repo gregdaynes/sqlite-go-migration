@@ -1,4 +1,4 @@
-package lib
+package main
 
 type Table struct {
 	Name    string
@@ -13,3 +13,5 @@ type TableColumn struct {
 	DefaultValue any
 	PrimaryKey   bool
 }
+
+type TableColumns map[string]TableColumn
