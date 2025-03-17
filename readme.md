@@ -72,6 +72,7 @@ CGO seems to be fine to use for sqlite. I was a little worried about it being sl
 - [x] * drop old table
 - [x] * rename new table
 - [ ] * create indexes again
+- [ ] * create views again
 - [x] * validate foreign keys `PRAGMA foreign_key_check`
 - [x] * commit transaction
 - [x] * re-enable foreign keys

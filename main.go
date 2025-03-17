@@ -5,20 +5,27 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type Schema map[string]Table
+
 type DB struct {
 	Connection *sql.DB
-	Schema     map[string]Table
+	Schema     Schema
+}
+
+type Index struct {
+	Name string
+	SQL  string
 }
 
 type Table struct {
-	Name    string
-	SQL     string
-	Columns TableColumnMap
+	Name     string
+	SQL      string
+	Columns  TableColumnMap
+	Indicies map[string]Index
 }
 
 type TableColumn struct {
@@ -34,32 +41,52 @@ type TableColumnMap map[string]TableColumn
 func NewDB(dsn string) (db *DB) {
 	db = &DB{
 		Connection: connectDB(dsn),
-		Schema:     make(map[string]Table),
+		Schema:     make(Schema),
 	}
 
 	return db
 }
 
-func (db *DB) GetSchema() map[string]Table {
+func (db *DB) GetSchema() Schema {
 	if len(db.Schema) == 0 {
-		db.Schema = make(map[string]Table)
+		db.Schema = make(Schema)
 
-		rows, _ := db.Query(`
-			SELECT name, sql from sqlite_schema
-			where type = "table" and name != "sqlite_sequence";
-		`)
+		rows, _ := db.Query(`SELECT type, name, tbl_name, sql from sqlite_schema`)
 		defer rows.Close()
 
 		for rows.Next() {
+			var colType string
 			var name string
+			var tblName string
 			var sql string
 
-			err := rows.Scan(&name, &sql)
+			err := rows.Scan(&colType, &name, &tblName, &sql)
 			if err != nil {
 				log.Fatal(err)
 			}
 
-			db.Schema[name] = Table{Name: name, SQL: sql, Columns: make(TableColumnMap)}
+			tbl, ok := db.Schema[tblName]
+			if !ok {
+				tbl = Table{
+					Name:     tblName,
+					SQL:      sql,
+					Columns:  make(TableColumnMap),
+					Indicies: make(map[string]Index),
+				}
+				db.Schema[tblName] = tbl
+			}
+
+			switch colType {
+			case "table":
+				tbl.Name = name
+				tbl.SQL = sql
+				tbl.Columns = make(TableColumnMap)
+				tbl.Indicies = make(map[string]Index)
+			case "index":
+				tbl.Indicies[tblName] = Index{Name: name, SQL: sql}
+			}
+
+			db.Schema[name] = tbl
 		}
 	}
 
@@ -155,6 +182,7 @@ func main() {
 
 	schema := ReadSchema("./schema.sql")
 	if err := CleanDB.Exec(schema); err != nil {
+		log.Fatal(err)
 		return
 	}
 
@@ -170,71 +198,93 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// 1. Disable foreign keys
-	err = CurrentDB.Exec("PRAGMA foreign_keys = OFF")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// 2. Start transaction
-	tx, err := CurrentDB.Connection.Begin()
-
-	// 3. Define create table statement with new name
-	// 4. Create new tables
-	// for each altered table, we perform the operations outlined in sqlite's documentation
-	for tableName := range CurrentDB.findAlteredTables(CleanDB) {
-		tableNameNew := tableName + "_new"
-		schema := CurrentDB.GetSchema()
-		stmt := strings.Replace(schema[tableName].SQL, tableName, tableNameNew, 1)
-
-		err = CurrentDB.Exec(stmt)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// 5. Transfer table contents to new table
-		// need to get the intersection of column names of the old and new table for the insert query
-		intersection := intersect(
-			CleanDB.GetColumnMap(tableName),
-			CurrentDB.GetColumnMap(tableName),
-		)
-
-		cols := strings.Join(intersection[:], ", ")
-		query := "INSERT INTO " + tableNameNew + " (" + cols + ") SELECT " + cols + " FROM " + tableName
-		err = CurrentDB.Exec(query)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// 6. Drop old table
-		err = CurrentDB.Exec("DROP TABLE " + tableName)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// 7. Rename new table to old table
-		err = CurrentDB.Exec("ALTER TABLE " + tableNameNew + " RENAME TO " + tableName)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// 8. Use CREATE INDEX, CREATE TRIGGER, and CREATE VIEW to reconstruct indexes, triggers, and views associated with table X. Perhaps use the old format of the triggers, indexes, and views saved from step 3 above as a guide, making changes as appropriate for the alteration.
-
-		// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
-	}
-
-	// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
-	err = CurrentDB.Exec("PRAGMA foreign_key_check")
-	if err != nil {
-
-		log.Fatal(err)
-	}
-
-	// 11.
-	err = tx.Commit()
-
-	// 12. Enable foreign keys again
-	err = CurrentDB.Exec("PRAGMA foreign_keys = ON")
+	// // create new table indices
+	// for tableName := range newTables {
+	// 	for indexName := range newTables[tableName].Indicies {
+	// 		err := CurrentDB.Exec(newTables[tableName].Indicies[indexName].SQL)
+	// 		if err != nil {
+	// 			log.Fatal(err)
+	// 		}
+	// 	}
+	// }
+	//
+	// // 1. Disable foreign keys
+	// err = CurrentDB.Exec("PRAGMA foreign_keys = OFF")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	//
+	// // 2. Start transaction
+	// tx, err := CurrentDB.Connection.Begin()
+	//
+	// // 3. Define create table statement with new name
+	// // 4. Create new tables
+	// // for each altered table, we perform the operations outlined in sqlite's documentation
+	// for tableName, table := range CurrentDB.findAlteredTables(CleanDB) {
+	// 	tableNameNew := tableName + "_new"
+	//
+	// 	stmt := strings.Replace(table.SQL, tableName, tableNameNew, 1)
+	// 	err = CurrentDB.Exec(stmt)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	//
+	// 	// 5. Transfer table contents to new table
+	// 	// need to get the intersection of column names of the old and new table for the insert query
+	// 	intersection := intersect(
+	// 		CleanDB.GetColumnMap(tableName),
+	// 		CurrentDB.GetColumnMap(tableName),
+	// 	)
+	// 	fmt.Println(intersection)
+	//
+	// 	cols := strings.Join(intersection[:], ", ")
+	// 	query := "INSERT INTO " + tableNameNew + " (" + cols + ") SELECT " + cols + " FROM " + tableName
+	// 	err = CurrentDB.Exec(query)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	fmt.Println("Inserted " + tableNameNew)
+	//
+	// 	// 6. Drop old table
+	// 	err = CurrentDB.Exec("DROP TABLE " + tableName)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	fmt.Println("Dropped " + tableName)
+	//
+	// 	// 7. Rename new table to old table
+	// 	err = CurrentDB.Exec("ALTER TABLE " + tableNameNew + " RENAME TO " + tableName)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	fmt.Println("Renamed " + tableNameNew + " to " + tableName)
+	//
+	// 	fmt.Println(table.Indicies)
+	//
+	// 	// 8. Use CREATE INDEX, CREATE TRIGGER, and CREATE VIEW to reconstruct indexes, triggers, and views associated with table X. Perhaps use the old format of the triggers, indexes, and views saved from step 3 above as a guide, making changes as appropriate for the alteration.
+	// 	for _, index := range table.Indicies {
+	// 		err = CurrentDB.Exec(index.SQL)
+	// 		if err != nil {
+	// 			log.Fatal(err)
+	// 		}
+	// 		fmt.Println("Created index " + index.Name)
+	// 	}
+	//
+	// 	// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
+	// }
+	//
+	// // 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
+	// err = CurrentDB.Exec("PRAGMA foreign_key_check")
+	// if err != nil {
+	//
+	// 	log.Fatal(err)
+	// }
+	//
+	// // 11.
+	// err = tx.Commit()
+	//
+	// // 12. Enable foreign keys again
+	// err = CurrentDB.Exec("PRAGMA foreign_keys = ON")
 
 	fmt.Println("Done")
 }
@@ -270,19 +320,19 @@ func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
 	return c
 }
 
-func (db *DB) findAlteredTables(CleanDB *DB) map[string]struct{} {
-	alteredTables := make(map[string]struct{})
+func (db *DB) findAlteredTables(CleanDB *DB) map[string]Table {
+	alteredTables := make(map[string]Table)
 
 	// Both schemas are cached before the tables were created/dropped
 	// so we can compare the columns without filtering new ones out
-	for name := range db.GetSchema() {
+	for name, table := range db.GetSchema() {
 		CleanColumns := CleanDB.GetColumnMap(name)
 		CurrentColumns := db.GetColumnMap(name)
 
 		add, remove := diff(CleanColumns, CurrentColumns)
 
 		if len(add) > 0 || len(remove) > 0 {
-			alteredTables[name] = struct{}{}
+			alteredTables[name] = table
 		}
 	}
 
