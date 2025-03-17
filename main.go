@@ -1,213 +1,62 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
-	"os"
 
+	"github.com/gregdaynes/sqlite-go-migration/lib"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type Schema map[string]Table
-
-type DB struct {
-	Connection *sql.DB
-	Schema     Schema
-}
-
-type Index struct {
-	Name string
-	SQL  string
-}
-
-type Table struct {
-	Name     string
-	SQL      string
-	Columns  TableColumnMap
-	Indicies map[string]Index
-}
-
-type TableColumn struct {
-	Name         string
-	Type         string
-	NotNull      bool
-	DefaultValue any
-	PrimaryKey   bool
-}
-
-type TableColumnMap map[string]TableColumn
-
-func NewDB(dsn string) (db *DB) {
-	db = &DB{
-		Connection: connectDB(dsn),
-		Schema:     make(Schema),
-	}
-
-	return db
-}
-
-func (db *DB) GetSchema() Schema {
-	if len(db.Schema) == 0 {
-		db.Schema = make(Schema)
-
-		rows, _ := db.Query(`SELECT type, name, tbl_name, sql from sqlite_schema`)
-		defer rows.Close()
-
-		for rows.Next() {
-			var colType string
-			var name string
-			var tblName string
-			var sql string
-
-			err := rows.Scan(&colType, &name, &tblName, &sql)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			tbl, ok := db.Schema[tblName]
-			if !ok {
-				tbl = Table{
-					Name:     tblName,
-					SQL:      sql,
-					Columns:  make(TableColumnMap),
-					Indicies: make(map[string]Index),
-				}
-				db.Schema[tblName] = tbl
-			}
-
-			switch colType {
-			case "table":
-				tbl.Name = name
-				tbl.SQL = sql
-				tbl.Columns = make(TableColumnMap)
-				tbl.Indicies = make(map[string]Index)
-			case "index":
-				tbl.Indicies[tblName] = Index{Name: name, SQL: sql}
-			}
-
-			db.Schema[name] = tbl
-		}
-	}
-
-	return db.Schema
-}
-
-func (db *DB) GetColumnMap(tableName string) TableColumnMap {
-	if len(db.Schema[tableName].Columns) == 0 {
-		// run the query to get the column
-		rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for rows.Next() {
-			var id int
-			var name string
-			var coltype string
-			var notnull int
-			var dfltValue any
-			var pk int
-
-			err = rows.Scan(&id, &name, &coltype, &notnull, &dfltValue, &pk)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			db.Schema[tableName].Columns[name] = TableColumn{
-				Name:         name,
-				Type:         coltype,
-				NotNull:      notnull == 1,
-				DefaultValue: dfltValue,
-				PrimaryKey:   pk == 1,
-			}
-		}
-	}
-
-	return db.Schema[tableName].Columns
-}
-
-func (db *DB) Exec(sql string) (err error) {
-	_, err = db.Connection.Exec(sql)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sql)
-	}
-	return err
-}
-
-func (db *DB) Query(sql string) (rows *sql.Rows, err error) {
-	rows, err = db.Connection.Query(sql)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sql)
-	}
-	return rows, err
-}
-
-func (db *DB) Close() (err error) {
-	err = db.Connection.Close()
-	return err
-}
-
-func (db *DB) removeTables(kv map[string]Table) (err error) {
-	for name := range kv {
-		err := db.Exec("DROP TABLE IF EXISTS " + name)
-		if err != nil {
-			log.Printf("%q: %s\n", err, name)
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (db *DB) createTables(kv map[string]Table) (err error) {
-	for _, table := range kv {
-		err := db.Exec(table.SQL)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func main() {
 	// Existing DB
-	CurrentDB := NewDB("file:test.db")
+	// CurrentDB := lib.NewDB("file:test.db")
+	CurrentDB := lib.NewDB("file:target.db?mode=memory")
+	schemax := lib.ReadSchemaFile("./schema2.sql")
+	if err := CurrentDB.Exec(schemax); err != nil {
+		log.Fatal(err)
+		return
+	}
 	defer CurrentDB.Close()
 
 	// Temporary In Memory DB - Based on the schema.sql file
-	CleanDB := NewDB("file:test.db?mode=memory")
+	CleanDB := lib.NewDB("file:test.db?mode=memory")
 	defer CleanDB.Close()
 
-	schema := ReadSchema("./schema.sql")
+	schema := lib.ReadSchemaFile("./schema.sql")
 	if err := CleanDB.Exec(schema); err != nil {
 		log.Fatal(err)
 		return
 	}
 
-	newTables, tablesToDrop := diff(CleanDB.GetSchema(), CurrentDB.GetSchema())
+	newTables, tablesToDrop := lib.Diff(CleanDB.GetSchema().Tables, CurrentDB.GetSchema().Tables)
 
-	err := CurrentDB.removeTables(tablesToDrop)
+	err := CurrentDB.RemoveTables(tablesToDrop)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = CurrentDB.createTables(newTables)
+	err = CurrentDB.CreateTables(newTables)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// // create new table indices
-	// for tableName := range newTables {
-	// 	for indexName := range newTables[tableName].Indicies {
-	// 		err := CurrentDB.Exec(newTables[tableName].Indicies[indexName].SQL)
-	// 		if err != nil {
-	// 			log.Fatal(err)
-	// 		}
-	// 	}
-	// }
-	//
+	// create indicies
+	newIndicies, removedIndicies := lib.Diff(CleanDB.GetSchema().Indicies, CurrentDB.GetSchema().Indicies)
+
+	for _, index := range newIndicies {
+		err := CurrentDB.Exec(index.SQL)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	for _, index := range removedIndicies {
+		err := CurrentDB.Exec("DROP INDEX IF EXISTS " + index.Name)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	// // 1. Disable foreign keys
 	// err = CurrentDB.Exec("PRAGMA foreign_keys = OFF")
 	// if err != nil {
@@ -286,93 +135,72 @@ func main() {
 	// // 12. Enable foreign keys again
 	// err = CurrentDB.Exec("PRAGMA foreign_keys = ON")
 
-	fmt.Println("Done")
+	fmt.Println("🛑")
 }
 
-func connectDB(dsn string) (db *sql.DB) {
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		log.Fatal(err)
-	}
+//	func (db *DB) GetColumnMap(tableName string) TableColumnMap {
+//		if len(db.Schema[tableName].Columns) == 0 {
+//			// run the query to get the column
+//			rows, err := db.Query(`PRAGMA table_info(` + tableName + `)`)
+//			if err != nil {
+//				log.Fatal(err)
+//			}
+//
+//			for rows.Next() {
+//				var id int
+//				var name string
+//				var coltype string
+//				var notnull int
+//				var dfltValue any
+//				var pk int
+//
+//				err = rows.Scan(&id, &name, &coltype, &notnull, &dfltValue, &pk)
+//				if err != nil {
+//					log.Fatal(err)
+//				}
+//
+//				db.Schema[tableName].Columns[name] = TableColumn{
+//					Name:         name,
+//					Type:         coltype,
+//					NotNull:      notnull == 1,
+//					DefaultValue: dfltValue,
+//					PrimaryKey:   pk == 1,
+//				}
+//			}
+//		}
+//
+//		return db.Schema[tableName].Columns
+//	}
 
-	return db
-}
-
-func ReadSchema(f string) string {
-	b, err := os.ReadFile(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	return string(b)
-}
-
-func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
-	c = make(map[string]string)
-
-	for key, value := range a {
-		_, exists := b[key]
-		if !exists {
-			c[key] = value
-		}
-	}
-
-	return c
-}
-
-func (db *DB) findAlteredTables(CleanDB *DB) map[string]Table {
-	alteredTables := make(map[string]Table)
-
-	// Both schemas are cached before the tables were created/dropped
-	// so we can compare the columns without filtering new ones out
-	for name, table := range db.GetSchema() {
-		CleanColumns := CleanDB.GetColumnMap(name)
-		CurrentColumns := db.GetColumnMap(name)
-
-		add, remove := diff(CleanColumns, CurrentColumns)
-
-		if len(add) > 0 || len(remove) > 0 {
-			alteredTables[name] = table
-		}
-	}
-
-	return alteredTables
-}
-
-func diff[T any](a, b map[string]T) (add, remove map[string]T) {
-	add = make(map[string]T)
-	remove = make(map[string]T)
-
-	for k := range a {
-		_, ok := b[k]
-		if !ok {
-			add[k] = a[k]
-		}
-	}
-
-	for k := range b {
-		_, ok := a[k]
-		if !ok {
-			remove[k] = b[k]
-		}
-	}
-
-	return add, remove
-}
-
-func intersect[T any](a, b map[string]T) []string {
-	intersection := []string{}
-
-	if len(a) > len(b) {
-		a, b = b, a
-	}
-
-	for k := range a {
-		_, ok := b[k]
-		if ok {
-			intersection = append(intersection, k)
-		}
-	}
-
-	return intersection
-}
+//
+// func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
+// 	c = make(map[string]string)
+//
+// 	for key, value := range a {
+// 		_, exists := b[key]
+// 		if !exists {
+// 			c[key] = value
+// 		}
+// 	}
+//
+// 	return c
+// }
+//
+// func (db *DB) findAlteredTables(CleanDB *DB) map[string]Table {
+// 	alteredTables := make(map[string]Table)
+//
+// 	// Both schemas are cached before the tables were created/dropped
+// 	// so we can compare the columns without filtering new ones out
+// 	for name, table := range db.GetSchema() {
+// 		CleanColumns := CleanDB.GetColumnMap(name)
+// 		CurrentColumns := db.GetColumnMap(name)
+//
+// 		add, remove := diff(CleanColumns, CurrentColumns)
+//
+// 		if len(add) > 0 || len(remove) > 0 {
+// 			alteredTables[name] = table
+// 		}
+// 	}
+//
+// 	return alteredTables
+// }
