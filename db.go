@@ -12,7 +12,7 @@ type DB struct {
 
 type Schema struct {
 	Tables   map[string]Table
-	Indicies map[string]Index
+	Indicies []Index
 }
 
 // NewDB creates a new DB object
@@ -30,8 +30,7 @@ func NewDB(params []string) (db *DB) {
 	db = &DB{
 		Connection: connectDB(dsn),
 		Schema: Schema{
-			Tables:   make(map[string]Table),
-			Indicies: make(map[string]Index),
+			Tables: make(map[string]Table),
 		},
 	}
 
@@ -87,7 +86,7 @@ func (db *DB) GetSchema() Schema {
 				}
 
 			case "index":
-				db.Schema.Indicies[tblName] = Index{Name: name, SQL: sql}
+				db.Schema.Indicies = append(db.Schema.Indicies, Index{Name: name, TableName: tblName, SQL: sql})
 			}
 		}
 	}
@@ -147,19 +146,14 @@ func (db *DB) ApplySchemaChanges(CleanDB *DB) {
 		log.Fatal(err)
 	}
 
-	// create indicies
-	newIndicies, removedIndicies := Diff(CleanDB.GetSchema().Indicies, db.GetSchema().Indicies)
-
-	for _, index := range newIndicies {
-		err := db.Exec(index.SQL)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	for _, index := range removedIndicies {
-		err := db.Exec("DROP INDEX IF EXISTS " + index.Name)
-		if err != nil {
-			log.Fatal(err)
+	// New tables get new indicies
+	for tableName, _ := range newTables {
+		newIndicies := CleanDB.GetSchema().GetTableIndices(tableName)
+		for _, index := range newIndicies {
+			err := db.Exec(index.SQL)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }
@@ -233,4 +227,16 @@ func (db *DB) findAlteredTables(CleanDB *DB) map[string]Table {
 	}
 
 	return alteredTables
+}
+
+func (schema Schema) GetTableIndices(tableName string) map[string]Index {
+	tableIndicies := make(map[string]Index)
+
+	for i := 0; i < len(schema.Indicies); i++ {
+		if schema.Indicies[i].TableName == tableName {
+			tableIndicies[schema.Indicies[i].Name] = schema.Indicies[i]
+		}
+	}
+
+	return tableIndicies
 }

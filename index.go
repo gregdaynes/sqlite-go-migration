@@ -1,6 +1,7 @@
 package main
 
 type Index struct {
-	Name string
-	SQL  string
+	Name      string
+	TableName string
+	SQL       string
 }

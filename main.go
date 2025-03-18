@@ -9,6 +9,7 @@ import (
 )
 
 func main() {
+
 	// Existing DB
 	// CurrentDB := NewDB([]string{"file:test.db"})
 	CurrentDB := NewDB([]string{"file:target.db", "./schema.sql"})
@@ -23,25 +24,22 @@ func main() {
 
 	// Find the tables that have been altered
 	// We do this before the transaction is started to ensure that the tables are in the same state
-	alteredTables := CurrentDB.findAlteredTables(CleanDB)
-
 	// 1. Disable foreign keys
 	CurrentDB.DisableForeignKeys()
 
-	// 2. Start transaction
-	tx, err := CurrentDB.Connection.Begin()
-	if err != nil {
-		log.Fatal(err)
-	}
+	for tableName, table := range CurrentDB.findAlteredTables(CleanDB) {
+		// 2. Start transaction
+		tx, err := CurrentDB.Connection.Begin()
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	// for each altered table, we perform the operations outlined in sqlite's documentation
-	// 3. Define create table statement with new name
-	for tableName, table := range alteredTables {
+		// 3. Define create table statement with new name
 		tableNameNew := tableName + "_new"
 
-		stmt := strings.Replace(table.SQL, tableName, tableNameNew, 1)
 		// 4. Create new tables
-		_, err := tx.Exec(stmt)
+		stmt := strings.Replace(table.SQL, tableName, tableNameNew, 1)
+		_, err = tx.Exec(stmt)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -76,42 +74,32 @@ func main() {
 		fmt.Println("Renamed " + tableNameNew + " to " + tableName)
 
 		// 8. Use CREATE INDEX, CREATE TRIGGER, and CREATE VIEW to reconstruct indexes, triggers, and views associated with table X. Perhaps use the old format of the triggers, indexes, and views saved from step 3 above as a guide, making changes as appropriate for the alteration.
-		// TODO / Leaving OFf
-		// the indices are not being created correctly
-		// I think when we're applying the major changes, we're creating the indicies in an altered table
-		// but we need to possible apply them at this point after a table alteration been made.
-		// Not sure how we can do this yet.
-		newIndicies, removedIndicies := Diff(CleanDB.GetSchema().Indicies, CurrentDB.GetSchema().Indicies)
-		fmt.Println(newIndicies, removedIndicies)
-
-		for _, index := range newIndicies {
+		idxs := CleanDB.GetSchema().GetTableIndices(tableName)
+		for _, index := range idxs {
 			_, err := tx.Exec(index.SQL)
 			if err != nil {
 				log.Fatal(err)
 			}
 		}
-		for _, index := range removedIndicies {
-			_, err := tx.Exec("DROP INDEX IF EXISTS " + index.Name)
-			if err != nil {
-				log.Fatal(err)
-			}
+
+		// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
+
+		// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
+		err = CurrentDB.Exec("PRAGMA foreign_key_check")
+		if err != nil {
+
+			log.Fatal(err)
 		}
+
+		// 11. End transaction
+		err = tx.Commit()
 	}
-
-	// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
-
-	// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
-	err = CurrentDB.Exec("PRAGMA foreign_key_check")
-	if err != nil {
-
-		log.Fatal(err)
-	}
-
-	// 11.
-	err = tx.Commit()
 
 	// 12. Enable foreign keys again
-	err = CurrentDB.Exec("PRAGMA foreign_keys = ON")
+	err := CurrentDB.Exec("PRAGMA foreign_keys = ON")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	fmt.Println("🛑")
 }
