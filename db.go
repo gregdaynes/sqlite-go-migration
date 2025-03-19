@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 )
 
@@ -59,35 +60,33 @@ func (db *DB) Close() (err error) {
 }
 
 func (db *DB) GetSchema() Schema {
-	if len(db.Schema.Tables) == 0 {
-		rows, err := db.Connection.Query(`SELECT type, name, tbl_name, sql from sqlite_schema`)
+	rows, err := db.Connection.Query(`SELECT type, name, tbl_name, sql FROM sqlite_schema`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var colType string
+		var name string
+		var tblName string
+		var createSQL string
+
+		err := rows.Scan(&colType, &name, &tblName, &createSQL)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer rows.Close()
 
-		for rows.Next() {
-			var colType string
-			var name string
-			var tblName string
-			var sql string
-
-			err := rows.Scan(&colType, &name, &tblName, &sql)
-			if err != nil {
-				log.Fatal(err)
+		switch colType {
+		case "table":
+			db.Schema.Tables[tblName] = Table{
+				Name:    name,
+				SQL:     createSQL,
+				Columns: make(map[string]TableColumn),
 			}
 
-			switch colType {
-			case "table":
-				db.Schema.Tables[tblName] = Table{
-					Name:    name,
-					SQL:     sql,
-					Columns: make(map[string]TableColumn),
-				}
-
-			case "index":
-				db.Schema.Indicies = append(db.Schema.Indicies, Index{Name: name, TableName: tblName, SQL: sql})
-			}
+		case "index":
+			db.Schema.Indicies = append(db.Schema.Indicies, Index{Name: name, TableName: tblName, SQL: createSQL})
 		}
 	}
 
@@ -112,7 +111,7 @@ func (db *DB) Query(sql string) (rows *sql.Rows, err error) {
 
 func (db *DB) RemoveTables(kv map[string]Table) (err error) {
 	for name := range kv {
-		err := db.Exec("DROP TABLE IF EXISTS " + name)
+		_, err := db.Connection.Exec("DROP TABLE " + name)
 		if err != nil {
 			log.Printf("%q: %s\n", err, name)
 			return err
@@ -141,13 +140,15 @@ func (db *DB) ApplySchemaChanges(CleanDB *DB) {
 		log.Fatal(err)
 	}
 
+	fmt.Println(db.GetSchema().Tables)
+
 	err = db.CreateTables(newTables)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// New tables get new indicies
-	for tableName, _ := range newTables {
+	for tableName := range newTables {
 		newIndicies := CleanDB.GetSchema().GetTableIndices(tableName)
 		for _, index := range newIndicies {
 			err := db.Exec(index.SQL)
@@ -197,31 +198,24 @@ func (db *DB) GetColumns(tableName string) TableColumns {
 	return db.Schema.Tables[tableName].Columns
 }
 
-func findMissingMapEntries(a, b map[string]string) (c map[string]string) {
-	c = make(map[string]string)
-
-	for key, value := range a {
-		_, exists := b[key]
-		if !exists {
-			c[key] = value
-		}
-	}
-
-	return c
-}
-
 func (db *DB) findAlteredTables(CleanDB *DB) map[string]Table {
 	alteredTables := make(map[string]Table)
 
 	// Both schemas are cached before the tables were created/dropped
 	// so we can compare the columns without filtering new ones out
 	for name, table := range db.GetSchema().Tables {
+		_, ok := CleanDB.GetSchema().Tables[name]
+		if !ok {
+			continue
+		}
+
 		CleanColumns := CleanDB.GetColumns(name)
 		CurrentColumns := db.GetColumns(name)
 
 		add, remove := Diff(CleanColumns, CurrentColumns)
 
 		if len(add) > 0 || len(remove) > 0 {
+			fmt.Println("xxx", name, len(add), len(remove))
 			alteredTables[name] = table
 		}
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -19,7 +20,7 @@ func main() {
 	CleanDB := NewDB([]string{"file:test.db?mode=memory", "./target.sql"})
 	defer CleanDB.Close()
 
-	// Apply schema changes (create tables/indicies, drop tables/indices)
+	// Apply schema changes (create tables/indices, drop tables/indices)
 	CurrentDB.ApplySchemaChanges(CleanDB)
 
 	// Find the tables that have been altered
@@ -38,56 +39,26 @@ func main() {
 		tableNameNew := tableName + "_new"
 
 		// 4. Create new tables
-		stmt := strings.Replace(table.SQL, tableName, tableNameNew, 1)
-		_, err = tx.Exec(stmt)
-		if err != nil {
-			log.Fatal(err)
-		}
+		createTable(tx, tableName, tableNameNew, table)
 
 		// 5. Transfer table contents to new table
 		// need to get the intersection of column names of the old and new table for the insert query
-		intersection := Intersect(
-			CleanDB.GetColumns(tableName),
-			CurrentDB.GetColumns(tableName),
-		)
-
-		cols := strings.Join(intersection[:], ", ")
-		query := "INSERT INTO " + tableNameNew + " (" + cols + ") SELECT " + cols + " FROM " + tableName
-		_, err = tx.Exec(query)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("Inserted " + tableNameNew)
+		MigrateContent(tx, CleanDB, CurrentDB, tableName, tableNameNew)
 
 		// 6. Drop old table
-		_, err = tx.Exec("DROP TABLE " + tableName)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("Dropped " + tableName)
+		dropTable(tx, tableName)
 
 		// 7. Rename new table to old table
-		_, err = tx.Exec("ALTER TABLE " + tableNameNew + " RENAME TO " + tableName)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("Renamed " + tableNameNew + " to " + tableName)
+		renameTable(tx, tableName, tableNameNew)
 
 		// 8. Use CREATE INDEX, CREATE TRIGGER, and CREATE VIEW to reconstruct indexes, triggers, and views associated with table X. Perhaps use the old format of the triggers, indexes, and views saved from step 3 above as a guide, making changes as appropriate for the alteration.
-		idxs := CleanDB.GetSchema().GetTableIndices(tableName)
-		for _, index := range idxs {
-			_, err := tx.Exec(index.SQL)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
+		createIndicesOnTable(tx, tableName, CleanDB)
 
 		// 9. If any views refer to table X in a way that is affected by the schema change, then drop those views using DROP VIEW and recreate them with whatever changes are necessary to accommodate the schema change using CREATE VIEW.
 
 		// 10. If foreign key constraints were originally enabled then run PRAGMA foreign_key_check to verify that the schema change did not break any foreign key constraints.
 		err = CurrentDB.Exec("PRAGMA foreign_key_check")
 		if err != nil {
-
 			log.Fatal(err)
 		}
 
@@ -102,4 +73,60 @@ func main() {
 	}
 
 	fmt.Println("🛑")
+}
+
+func createIndicesOnTable(tx *sql.Tx, tableName string, CleanDB *DB) {
+	indices := CleanDB.GetSchema().GetTableIndices(tableName)
+	for _, index := range indices {
+		_, err := tx.Exec(index.SQL)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+func renameTable(tx *sql.Tx, tableName string, tableNameNew string) {
+	fmt.Println("renaming table " + tableName)
+	_, err := tx.Exec("ALTER TABLE "+tableNameNew+" RENAME TO "+tableName, tableNameNew, tableName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Renamed " + tableNameNew + " to " + tableName)
+}
+
+func createTable(tx *sql.Tx, tableName string, tableNameNew string, table Table) {
+	fmt.Println("creating table " + tableName)
+	stmt := strings.Replace(table.SQL, tableName, tableNameNew, 1)
+	_, err := tx.Exec(stmt)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func dropTable(tx *sql.Tx, tableName string) {
+	fmt.Println("Dropping " + tableName)
+	_, err := tx.Exec(`DROP TABLE IF EXISTS ` + tableName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Dropped " + tableName)
+}
+
+func MigrateContent(tx *sql.Tx, CleanDB *DB, CurrentDB *DB, tableName string, tableNameNew string) {
+	fmt.Println("migrating content " + tableName)
+	intersection := Intersect(
+		CleanDB.GetColumns(tableName),
+		CurrentDB.GetColumns(tableName),
+	)
+	if len(intersection) == 0 {
+		return
+	}
+
+	cols := strings.Join(intersection[:], ", ")
+	fmt.Println(tableNameNew, cols, tableName)
+	_, err := tx.Exec("INSERT INTO " + tableNameNew + " (" + cols + ") SELECT " + cols + " FROM " + tableName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Inserted " + tableNameNew)
 }
