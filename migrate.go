@@ -1,4 +1,4 @@
-package main
+package migrate
 
 import (
 	"database/sql"
@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func main() {
+func Migrate() {
 	// Existing DB
 	// CurrentDB := NewDB([]string{"file:test.db"})
 	CurrentDB := NewDB([]string{"file:target.db", "./schema.sql"})

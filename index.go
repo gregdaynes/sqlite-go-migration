@@ -1,4 +1,4 @@
-package main
+package migrate
 
 type Index struct {
 	Name      string
