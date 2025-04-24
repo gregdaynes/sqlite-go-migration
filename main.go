@@ -10,7 +10,6 @@ import (
 )
 
 func main() {
-
 	// Existing DB
 	// CurrentDB := NewDB([]string{"file:test.db"})
 	CurrentDB := NewDB([]string{"file:target.db", "./schema.sql"})
@@ -23,8 +22,6 @@ func main() {
 	// Apply schema changes (create tables/indices, drop tables/indices)
 	CurrentDB.ApplySchemaChanges(CleanDB)
 
-	// Find the tables that have been altered
-	// We do this before the transaction is started to ensure that the tables are in the same state
 	// 1. Disable foreign keys
 	CurrentDB.DisableForeignKeys()
 
@@ -42,8 +39,7 @@ func main() {
 		createTable(tx, tableName, tableNameNew, table)
 
 		// 5. Transfer table contents to new table
-		// need to get the intersection of column names of the old and new table for the insert query
-		MigrateContent(tx, CleanDB, CurrentDB, tableName, tableNameNew)
+		migrateContent(tx, CleanDB, CurrentDB, tableName, tableNameNew)
 
 		// 6. Drop old table
 		dropTable(tx, tableName)
@@ -112,7 +108,7 @@ func dropTable(tx *sql.Tx, tableName string) {
 	fmt.Println("Dropped " + tableName)
 }
 
-func MigrateContent(tx *sql.Tx, CleanDB *DB, CurrentDB *DB, tableName string, tableNameNew string) {
+func migrateContent(tx *sql.Tx, CleanDB *DB, CurrentDB *DB, tableName string, tableNameNew string) {
 	fmt.Println("migrating content " + tableName)
 	intersection := Intersect(
 		CleanDB.GetColumns(tableName),
