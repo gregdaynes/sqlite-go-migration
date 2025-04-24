@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+
+	_ "modernc.org/sqlite"
 )
 
 type DB struct {
@@ -46,7 +48,7 @@ func NewDB(params []string) (db *DB) {
 }
 
 func connectDB(dsn string) (db *sql.DB) {
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
